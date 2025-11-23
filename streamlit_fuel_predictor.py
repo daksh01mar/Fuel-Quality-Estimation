@@ -204,7 +204,14 @@ def main():
     st.sidebar.write("You can upload different model artifacts directly to the repository root and redeploy.")
 
     # cache imputer to speed up
-    if 'imputer' not in st.session_state:
+    # If the dataset features change (e.g. LABEL column removed) we must refit the imputer.
+    need_refit = True
+    if 'imputer' in st.session_state:
+        existing = st.session_state['imputer']
+        n_in = getattr(existing, 'n_features_in_', None)
+        if n_in == len(feature_names):
+            need_refit = False
+    if need_refit:
         with st.spinner('Fitting imputer on dataset...'):
             st.session_state['imputer'] = build_imputer(df)
     imputer = st.session_state['imputer']
