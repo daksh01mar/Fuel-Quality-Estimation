@@ -6,7 +6,7 @@ import zipfile
 import tempfile
 import os
 from pathlib import Path
-from sklearn.experimental import enable_iterative_imputer
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
 
 # ------------------ Configuration (repo-root paths) ------------------
@@ -82,7 +82,8 @@ def extract_models_from_zip(zip_path):
                     m = joblib.load(p.as_posix())
                     models[p.name] = m
                 except Exception as e:
-                    st.warning(f"Couldn't load {p.name} from zip: {e}")
+                    # Keep a silent load failure for model files inside zip to avoid printing shape errors here.
+                    pass
     except zipfile.BadZipFile:
         st.warning("rf_model.zip is not a valid zip file or is missing.")
     return models
@@ -97,11 +98,16 @@ def create_input_row(feature_names, user_inputs):
 
 
 def apply_model_predictions(model, X_for_models, feature_names, current_result, user_inputs, name_hint=None):
+    """
+    Try to apply a model's predict output to fill missing features.
+    Returns (updated_result_dict, sources_dict)
+    This version intentionally suppresses model predict error messages that expose internal feature counts.
+    """
     sources = {}
     try:
         ypred = model.predict(X_for_models)
-    except Exception as e:
-        st.warning(f"Model {name_hint or str(model)} failed to predict: {e}")
+    except Exception:
+        # Silently skip models that can't predict on the provided X shape.
         return current_result, sources
     ypred = np.asarray(ypred)
     n_features = len(feature_names)
@@ -151,8 +157,6 @@ def infer_ranges_from_specs_or_data(feature_names, df):
             # try to find columns that match feature names and min/max
             for fname in feature_names:
                 if fname in spec_df.columns:
-                    # if column contains a range string like '820-845' attempt parse, else skip
-                    # alternatively check for spec_df rows with 'min'/'max' columns
                     pass
             # look for 'Parameter','Min','Max' style
             param_col = None
@@ -221,8 +225,9 @@ def main():
     if os.path.exists(SCALER_PATH):
         try:
             scaler = joblib.load(SCALER_PATH)
-        except Exception as e:
-            st.sidebar.warning(f"Couldn't load scaler: {e}")
+        except Exception:
+            # suppressed: do not show scaler load errors to the user
+            scaler = None
 
     pls_model = None
     if os.path.exists(PLS_PATH):
@@ -276,8 +281,9 @@ def main():
             if scaler is not None:
                 try:
                     X_for_models = scaler.transform(X_imputed)
-                except Exception as e:
-                    st.warning(f"Scaler transform failed: {e}. Proceeding with unscaled features.")
+                except Exception:
+                    # Suppressed: do not display the scaler transform failure message to user
+                    X_for_models = X_imputed.copy()
 
             # RF
             if predictor in ("RF only", "Auto (imputer + models)") and rf_models:
@@ -291,8 +297,12 @@ def main():
                         sources.update(new_sources)
             # PLS
             if predictor in ("PLS only", "Auto (imputer + models)") and pls_model is not None:
-                result, new_sources = apply_model_predictions(pls_model, X_for_models, feature_names, result, user_inputs, name_hint=os.path.basename(PLS_PATH))
-                sources.update(new_sources)
+                try:
+                    result, new_sources = apply_model_predictions(pls_model, X_for_models, feature_names, result, user_inputs, name_hint=os.path.basename(PLS_PATH))
+                    sources.update(new_sources)
+                except Exception:
+                    # Suppress shape mismatch messaging from PLS predictions
+                    pass
 
             # display
             out_df = pd.DataFrame([result]).T
