@@ -53,6 +53,8 @@ def load_dataset(path=DATA_XLSX):
             df = df.drop(columns=[c])
     # keep numeric
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    # remove any accidental 'LABEL' column (case-insensitive)
+    numeric_cols = [c for c in numeric_cols if c.lower() != 'label']
     df = df[numeric_cols].copy()
     if df.shape[1] == 0:
         st.error("No numeric columns found in dataset. Please check the uploaded Excel file.")
@@ -235,7 +237,12 @@ def main():
     cols = st.columns(3)
     for i, fname in enumerate(feature_names):
         with cols[i % 3]:
-            inp = st.text_input(f"{fname}", key=f"inp_{fname}", placeholder=f"Enter {fname} (e.g. {df[fname].median():.3g})")
+            inp = st.text_input(
+                "",
+                key=f"inp_{fname}",
+                placeholder=f"Enter {fname} (e.g. {df[fname].median():.3g})",
+                label_visibility="collapsed"
+            )
             lo, hi = ranges.get(fname, (None, None))
             if lo is not None and hi is not None:
                 st.markdown(f"<div class='small-muted'>Range: {lo:.6g} — {hi:.6g}</div>", unsafe_allow_html=True)
