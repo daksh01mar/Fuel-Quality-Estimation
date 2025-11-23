@@ -235,7 +235,7 @@ def main():
     cols = st.columns(3)
     for i, fname in enumerate(feature_names):
         with cols[i % 3]:
-            inp = st.text_input(label=f"{fname}", placeholder=f"Enter value (e.g. {df[fname].median():.3g})", label_visibility="visible", key=f"inp_{fname}"), key=f"inp_{fname}", placeholder=f"Enter {fname} (e.g. {df[fname].median():.3g})")
+            inp = st.text_input(f"{fname}", key=f"inp_{fname}", placeholder=f"Enter {fname} (e.g. {df[fname].median():.3g})")
             lo, hi = ranges.get(fname, (None, None))
             if lo is not None and hi is not None:
                 st.markdown(f"<div class='small-muted'>Range: {lo:.6g} — {hi:.6g}</div>", unsafe_allow_html=True)
