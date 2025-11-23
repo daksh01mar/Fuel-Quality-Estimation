@@ -19,7 +19,7 @@ RF_ZIP_PATH = "rf_model.zip"
 
 st.set_page_config(page_title="Fuel Parameter Predictor + Quality", layout="wide")
 
-# ------------------ Quality scoring config (from user's snippet) ------------------
+# ------------------ Quality scoring config ------------------
 SPECS = {
     "CN":     {"type": "ge",    "min": 51.0,              "label": "Cetane Number"},
     "D4052":  {"type": "range", "min": 820.0, "max": 845.0, "label": "Density @15°C (kg/m³)"},
@@ -48,6 +48,7 @@ WEIGHTS = {
     "FREEZE": 0.10,
 }
 
+# ------------------ Scoring functions ------------------
 def score_ge(val, min_, tol):
     if val >= min_:
         return 1.0
@@ -189,10 +190,52 @@ def apply_model_predictions(model, X_for_models, feature_names, current_result, 
             sources[missing[j]] = name_hint or 'model'
     return current_result, sources
 
-# ------------------ App UI ------------------
+def infer_ranges_from_specs_or_data(feature_names, df):
+    ranges = {}
+    # try to read SPEC_XLSX if present and has min/max columns
+    if os.path.exists(SPEC_XLSX):
+        try:
+            spec_df = pd.read_excel(SPEC_XLSX)
+            # try to find columns that match feature names and min/max
+            # look for 'Parameter','Min','Max' style
+            param_col = None
+            min_col = None
+            max_col = None
+            for c in spec_df.columns:
+                lc = c.lower()
+                if 'param' in lc or 'parameter' in lc or 'name' in lc:
+                    param_col = c
+                if lc in ('min','minimum'):
+                    min_col = c
+                if lc in ('max','maximum'):
+                    max_col = c
+            if param_col and min_col and max_col:
+                for _, row in spec_df.iterrows():
+                    p = row[param_col]
+                    if p in feature_names:
+                        try:
+                            ranges[p] = (float(row[min_col]), float(row[max_col]))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    # fallback to dataset percentiles if not found
+    for fname in feature_names:
+        if fname not in ranges:
+            col = df[fname].dropna()
+            if len(col) > 10:
+                lo = float(col.quantile(0.01))
+                hi = float(col.quantile(0.99))
+            else:
+                lo = float(col.min())
+                hi = float(col.max())
+            # small padding
+            padding = max(abs(0.05 * lo), 1e-6)
+            ranges[fname] = (lo - padding, hi + padding)
+    return ranges
 
+# ------------------ UI: render quality ------------------
 def render_quality_from_values(vals):
-    # vals: dict with keys matching SPECS (CN,D4052,VISC,FLASH,BP50,FREEZE,TOTAL)
     prop_rows = []
     weighted_sum = 0.0
     weight_total = 0.0
@@ -239,6 +282,7 @@ def render_quality_from_values(vals):
         "instead, the score gradually decreases based on how far it is from the spec."
     )
 
+# ------------------ App UI ------------------
 
 def main():
     st.sidebar.title("App mode")
@@ -379,7 +423,7 @@ def main():
                 pred_df = pd.read_csv('predicted_fuel_properties.csv')
                 # expect single-row
                 if pred_df.shape[0] >= 1:
-                    row = pred_df.iloc[0].to_dict()
+                    row = pred_df.iloc(0).to_dict()
                     vals = {
                         "CN": row.get('CN'),
                         "D4052": row.get('D4052'),
