@@ -9,9 +9,9 @@ from pathlib import Path
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 
-# ------------------ Configuration (uploaded files) ------------------
+# ------------------ Configuration (repo-root paths) ------------------
 DATA_XLSX = "diesel_properties_clean.xlsx"
-SPEC_XLSX = "diesel_spec.xlsx"
+SPEC_XLSX = "diesel_spec.xlsx"  # optional
 SCALER_PATH = "scaler.joblib"
 PLS_PATH = "pls_model.joblib"
 RF_ZIP_PATH = "rf_model.zip"
@@ -19,29 +19,31 @@ RF_ZIP_PATH = "rf_model.zip"
 
 st.set_page_config(page_title="Fuel Parameter Predictor", layout="wide")
 
-# Minimal dark theme tweaks
+# Gentle, readable theme (teal accents on light/dark neutral background)
 st.markdown(
     """
     <style>
-    .stApp { background-color: #0e1117; color: #e6edf3; }
-    .stButton>button { background-color: #1f2937; color: #e6edf3; }
-    .stTextInput>div>div>input { background-color: #0b1220; color: #e6edf3; }
-    .stSelectbox>div>div { background-color: #0b1220; color: #e6edf3; }
-    .stFileUploader>div { background-color: #0b1220; color: #e6edf3; }
-    table { color: #e6edf3; }
+    :root { --bg: #f6f8fa; --card: #ffffff; --text: #0f1724; --muted: #475569; --accent: #0ea5a4; }
+    .stApp { background: var(--bg); color: var(--text); }
+    .stSidebar .stButton>button { background-color: var(--accent); color: white; }
+    .stButton>button { background-color: var(--accent); color: white; }
+    .stTextInput>div>div>input, .stNumberInput>div>div>input { background: #fff; color: var(--text); }
+    .stMarkdown { color: var(--text); }
+    .small-muted { color: var(--muted); font-size:12px; margin-top:-8px }
+    table { color: var(--text); }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("Fuel parameter predictor (Streamlit)")
-st.caption("Supply any two numeric parameters and choose a predictor: Imputer (default), PLS, RF, or Auto.")
+st.title("Fuel Parameter Predictor")
+st.write("Enter **any two** numeric parameters below. Ranges are shown under each input to help you.")
 
 # ------------------ Helper functions ------------------
 
 def load_dataset(path=DATA_XLSX):
     if not os.path.exists(path):
-        st.error(f"Dataset not found at {path}")
+        st.error(f"Dataset not found at {path}. Make sure you uploaded `{path}` to your repo root.")
         st.stop()
     df = pd.read_excel(path)
     # drop obvious non-feature columns
@@ -93,7 +95,6 @@ def create_input_row(feature_names, user_inputs):
 
 
 def apply_model_predictions(model, X_for_models, feature_names, current_result, user_inputs, name_hint=None):
-    """Try to apply model predictions to feature dict. Returns updated result and sources."""
     sources = {}
     try:
         ypred = model.predict(X_for_models)
@@ -102,7 +103,6 @@ def apply_model_predictions(model, X_for_models, feature_names, current_result, 
         return current_result, sources
     ypred = np.asarray(ypred)
     n_features = len(feature_names)
-    # many shapes handled permissively
     if ypred.ndim == 2 and ypred.shape[1] == n_features:
         for i, fname in enumerate(feature_names):
             if fname not in user_inputs:
@@ -132,7 +132,6 @@ def apply_model_predictions(model, X_for_models, feature_names, current_result, 
                 current_result[missing[j]] = float(ypred[j])
                 sources[missing[j]] = name_hint or 'model'
     else:
-        # fallback: try to assign first values to first missing
         missing = [f for f in feature_names if f not in user_inputs]
         flat = ypred.ravel()
         for j in range(min(len(flat), len(missing))):
@@ -141,28 +140,74 @@ def apply_model_predictions(model, X_for_models, feature_names, current_result, 
     return current_result, sources
 
 
+def infer_ranges_from_specs_or_data(feature_names, df):
+    ranges = {}
+    # try to read SPEC_XLSX if present and has min/max columns
+    if os.path.exists(SPEC_XLSX):
+        try:
+            spec_df = pd.read_excel(SPEC_XLSX)
+            # try to find columns that match feature names and min/max
+            for fname in feature_names:
+                if fname in spec_df.columns:
+                    # if column contains a range string like '820-845' attempt parse, else skip
+                    # alternatively check for spec_df rows with 'min'/'max' columns
+                    pass
+            # look for 'Parameter','Min','Max' style
+            param_col = None
+            min_col = None
+            max_col = None
+            for c in spec_df.columns:
+                lc = c.lower()
+                if 'param' in lc or 'parameter' in lc or 'name' in lc:
+                    param_col = c
+                if lc in ('min','minimum'):
+                    min_col = c
+                if lc in ('max','maximum'):
+                    max_col = c
+            if param_col and min_col and max_col:
+                for _, row in spec_df.iterrows():
+                    p = row[param_col]
+                    if p in feature_names:
+                        try:
+                            ranges[p] = (float(row[min_col]), float(row[max_col]))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    # fallback to dataset percentiles if not found
+    for fname in feature_names:
+        if fname not in ranges:
+            col = df[fname].dropna()
+            if len(col) > 10:
+                lo = float(col.quantile(0.01))
+                hi = float(col.quantile(0.99))
+            else:
+                lo = float(col.min())
+                hi = float(col.max())
+            # small padding
+            padding = max(abs(0.05 * lo), 1e-6)
+            ranges[fname] = (lo - padding, hi + padding)
+    return ranges
+
 # ------------------ App logic ------------------
 
 def main():
     df = load_dataset()
     feature_names = df.columns.tolist()
-    st.sidebar.header("Files & models (fixed)")
-    st.sidebar.write("Dataset:")
-    st.sidebar.text(DATA_XLSX)
-    st.sidebar.write("PLS:")
-    st.sidebar.text(PLS_PATH if os.path.exists(PLS_PATH) else "(not found)")
-    st.sidebar.write("Scaler:")
-    st.sidebar.text(SCALER_PATH if os.path.exists(SCALER_PATH) else "(not found)")
-    st.sidebar.write("RF zip:")
-    st.sidebar.text(RF_ZIP_PATH if os.path.exists(RF_ZIP_PATH) else "(not found)")
 
-    # build imputer (could be slow; do it once and cache)
+    st.sidebar.header("Predictor & Models")
+    st.sidebar.write("Files expected in repo root: diesel_properties_clean.xlsx, scaler.joblib (optional), pls_model.joblib (optional), rf_model.zip (optional)")
+    predictor = st.sidebar.selectbox("Predictor", options=["Auto (imputer + models)", "Imputer only", "PLS only", "RF only"]) 
+    st.sidebar.markdown("---")
+    st.sidebar.write("You can upload different model artifacts directly to the repository root and redeploy.")
+
+    # cache imputer to speed up
     if 'imputer' not in st.session_state:
         with st.spinner('Fitting imputer on dataset...'):
             st.session_state['imputer'] = build_imputer(df)
     imputer = st.session_state['imputer']
 
-    # load optional artifacts
+    # load optional models
     scaler = None
     if os.path.exists(SCALER_PATH):
         try:
@@ -179,58 +224,40 @@ def main():
 
     rf_models = extract_models_from_zip(RF_ZIP_PATH)
 
-    st.sidebar.header("Predictor options")
-    predictor = st.sidebar.selectbox("Predictor", options=["Auto (imputer + models)", "Imputer only", "PLS only", "RF models only"]) 
-    show_raw = st.sidebar.checkbox("Show raw imputed vector", value=False)
+    # compute ranges to display under inputs
+    ranges = infer_ranges_from_specs_or_data(feature_names, df)
 
-    col1, col2 = st.columns([1, 2])
+    # Build a clean grid of inputs (no extra checkboxes)
+    st.subheader("Inputs")
+    st.write("Provide any two parameter values. Leave others blank.")
 
-    with col1:
-        st.subheader("Input parameters")
-        st.write("Provide any TWO numeric parameters. Leave others blank.")
-        user_inputs = {}
-        # Provide input fields for all features but recommend only two
-        for fname in feature_names:
-            val = st.number_input(label=fname, key=f"inp_{fname}", format="%.6g")
-            # number_input returns 0.0 default; we want blank semantics. To allow blank, use text_input and try parse.
-            # But to keep simple, we'll interpret 0.0 as a valid entry if user explicitly checks a box.
-            # Instead provide a checkbox to indicate if provided
-            provided = st.checkbox(f"Provide {fname}", key=f"chk_{fname}")
-            if provided:
-                txt = st.text_input(f"Value for {fname}", key=f"txt_{fname}")
+    user_inputs = {}
+    cols = st.columns(3)
+    for i, fname in enumerate(feature_names):
+        with cols[i % 3]:
+            inp = st.text_input(f"{fname}", key=f"inp_{fname}", placeholder=f"Enter {fname} (e.g. {df[fname].median():.3g})")
+            lo, hi = ranges.get(fname, (None, None))
+            if lo is not None and hi is not None:
+                st.markdown(f"<div class='small-muted'>Range: {lo:.6g} — {hi:.6g}</div>", unsafe_allow_html=True)
+            # try parse
+            if inp is not None and inp.strip() != "":
                 try:
-                    v = float(txt)
+                    v = float(inp)
                     user_inputs[fname] = v
                 except Exception:
-                    st.warning(f"Invalid numeric for {fname}. Leave blank or enter a number.")
-
-        if len(user_inputs) < 2:
-            st.info("Please provide at least two parameters (tick Provide and enter value).")
-
-        predict_btn = st.button("Predict")
-
-    with col2:
-        st.subheader("Results")
-        result_area = st.empty()
+                    st.info(f"{fname}: Unable to parse '{inp}' as a number. Please enter a numeric value.")
+    st.markdown("---")
+    predict_btn = st.button("Predict", key="predict")
 
     if predict_btn:
         if len(user_inputs) < 2:
-            st.error("You must provide at least two parameters.")
+            st.error("Please enter at least two numeric parameters.")
         else:
-            # Prepare input
             X_row = create_input_row(feature_names, user_inputs)
             X_imputed = imputer.transform(X_row)
-            # base result from imputer
             result = dict(zip(feature_names, X_imputed.ravel().tolist()))
             sources = {f: ('user' if f in user_inputs else 'imputer') for f in feature_names}
 
-            # Optionally show raw imputed vector
-            if show_raw:
-                imputed_df = pd.DataFrame([result])
-                st.write("Imputer result:")
-                st.dataframe(imputed_df)
-
-            # prepare scaled vector for models
             X_for_models = X_imputed.copy()
             if scaler is not None:
                 try:
@@ -238,9 +265,8 @@ def main():
                 except Exception as e:
                     st.warning(f"Scaler transform failed: {e}. Proceeding with unscaled features.")
 
-            # Apply models based on predictor choice
-            if predictor in ("RF models only", "Auto (imputer + models)") and rf_models:
-                # if single model, apply; if many, try per-file names
+            # RF
+            if predictor in ("RF only", "Auto (imputer + models)") and rf_models:
                 if len(rf_models) == 1:
                     name, model = next(iter(rf_models.items()))
                     result, new_sources = apply_model_predictions(model, X_for_models, feature_names, result, user_inputs, name_hint=name)
@@ -249,33 +275,25 @@ def main():
                     for name, model in rf_models.items():
                         result, new_sources = apply_model_predictions(model, X_for_models, feature_names, result, user_inputs, name_hint=name)
                         sources.update(new_sources)
+            # PLS
             if predictor in ("PLS only", "Auto (imputer + models)") and pls_model is not None:
                 result, new_sources = apply_model_predictions(pls_model, X_for_models, feature_names, result, user_inputs, name_hint=os.path.basename(PLS_PATH))
                 sources.update(new_sources)
 
-            # Prepare result table
-            out_df = pd.DataFrame([result])
-            # round for display
+            # display
+            out_df = pd.DataFrame([result]).T
+            out_df.columns = ["Value"]
+            out_df["Source"] = pd.Series(sources)
             out_df_display = out_df.round(6)
-            # attach source row
-            src_row = pd.DataFrame([sources])
-            display_df = out_df_display.T
-            display_df.columns = ["Value"]
-            display_df["Source"] = src_row.T
+            st.subheader("Predicted / Completed Properties")
+            st.dataframe(out_df_display)
 
-            result_area.dataframe(display_df)
-
-            # allow CSV download
-            csv = out_df.to_csv(index=False)
+            csv = pd.DataFrame([result]).to_csv(index=False)
             st.download_button("Download CSV", data=csv, file_name="predicted_fuel_properties.csv", mime="text/csv")
 
-            # show which inputs were used
-            st.write("Inputs provided:")
+            st.write("**Inputs provided:**")
             st.json(user_inputs)
-
-            # small note
-            st.caption("Source legend: 'user' = provided by you; 'imputer' = IterativeImputer; others = model filename used.")
-
+            st.caption("Source legend: 'user' = provided by you; 'imputer' = filled by IterativeImputer; others = model filename used.")
 
 if __name__ == '__main__':
     main()
