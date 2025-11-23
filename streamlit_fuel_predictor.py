@@ -10,11 +10,11 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 
 # ------------------ Configuration (uploaded files) ------------------
-DATA_XLSX = "/mnt/data/diesel_properties_clean.xlsx"
-SPEC_XLSX = "/mnt/data/diesel_spec.xlsx"  # optional
-SCALER_PATH = "/mnt/data/scaler.joblib"
-PLS_PATH = "/mnt/data/pls_model.joblib"
-RF_ZIP_PATH = "/mnt/data/rf_model.zip"
+DATA_XLSX = "diesel_properties_clean.xlsx"
+SPEC_XLSX = "diesel_spec.xlsx"
+SCALER_PATH = "scaler.joblib"
+PLS_PATH = "pls_model.joblib"
+RF_ZIP_PATH = "rf_model.zip"
 # ------------------------------------------------------------------
 
 st.set_page_config(page_title="Fuel Parameter Predictor", layout="wide")
