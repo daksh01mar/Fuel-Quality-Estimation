@@ -6,6 +6,7 @@ import zipfile
 import tempfile
 import os
 from pathlib import Path
+from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 
 # ------------------ Configuration (uploaded files) ------------------
