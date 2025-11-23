@@ -6,7 +6,7 @@ import zipfile
 import tempfile
 import os
 from pathlib import Path
-from sklearn.experimental import enable_iterative_imputer
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
 
 # ------------------ Configuration (repo-root paths) ------------------
@@ -39,7 +39,9 @@ st.markdown(
 st.title("Fuel Parameter Predictor")
 st.write("Enter **any two** numeric parameters below. Ranges are shown under each input to help you.")
 
+
 # ------------------ Helper functions ------------------
+
 
 def load_dataset(path=DATA_XLSX):
     if not os.path.exists(path):
@@ -97,6 +99,10 @@ def create_input_row(feature_names, user_inputs):
 
 
 def apply_model_predictions(model, X_for_models, feature_names, current_result, user_inputs, name_hint=None):
+    """
+    Try to apply a model's predict output to fill missing features.
+    Returns (updated_result_dict, sources_dict)
+    """
     sources = {}
     try:
         ypred = model.predict(X_for_models)
@@ -105,6 +111,7 @@ def apply_model_predictions(model, X_for_models, feature_names, current_result, 
         return current_result, sources
     ypred = np.asarray(ypred)
     n_features = len(feature_names)
+    # Many possible shapes -> decode sensibly
     if ypred.ndim == 2 and ypred.shape[1] == n_features:
         for i, fname in enumerate(feature_names):
             if fname not in user_inputs:
@@ -134,6 +141,7 @@ def apply_model_predictions(model, X_for_models, feature_names, current_result, 
                 current_result[missing[j]] = float(ypred[j])
                 sources[missing[j]] = name_hint or 'model'
     else:
+        # Fallback: flatten and assign to missing features
         missing = [f for f in feature_names if f not in user_inputs]
         flat = ypred.ravel()
         for j in range(min(len(flat), len(missing))):
@@ -148,13 +156,6 @@ def infer_ranges_from_specs_or_data(feature_names, df):
     if os.path.exists(SPEC_XLSX):
         try:
             spec_df = pd.read_excel(SPEC_XLSX)
-            # try to find columns that match feature names and min/max
-            for fname in feature_names:
-                if fname in spec_df.columns:
-                    # if column contains a range string like '820-845' attempt parse, else skip
-                    # alternatively check for spec_df rows with 'min'/'max' columns
-                    pass
-            # look for 'Parameter','Min','Max' style
             param_col = None
             min_col = None
             max_col = None
@@ -162,9 +163,9 @@ def infer_ranges_from_specs_or_data(feature_names, df):
                 lc = c.lower()
                 if 'param' in lc or 'parameter' in lc or 'name' in lc:
                     param_col = c
-                if lc in ('min','minimum'):
+                if lc in ('min', 'minimum'):
                     min_col = c
-                if lc in ('max','maximum'):
+                if lc in ('max', 'maximum'):
                     max_col = c
             if param_col and min_col and max_col:
                 for _, row in spec_df.iterrows():
@@ -186,12 +187,103 @@ def infer_ranges_from_specs_or_data(feature_names, df):
             else:
                 lo = float(col.min())
                 hi = float(col.max())
-            # small padding
             padding = max(abs(0.05 * lo), 1e-6)
             ranges[fname] = (lo - padding, hi + padding)
     return ranges
 
+
+def safe_apply_pls(pls_model, X_for_models, feature_names, base_result, user_inputs, imputer=None):
+    """
+    Attempt to apply a PLS model while handling mismatched feature-counts safely.
+    Returns updated_result_dict and updated_sources_dict.
+    """
+    sources = {}
+    result_updates = {}
+
+    req = getattr(pls_model, "n_features_in_", None)
+    fname_in = getattr(pls_model, "feature_names_in_", None)
+    cur = X_for_models.shape[1]
+
+    # Case A: exact match -> apply directly
+    if req is not None and req == cur:
+        try:
+            result_updates, sources = apply_model_predictions(pls_model, X_for_models, feature_names, base_result.copy(), user_inputs, name_hint=os.path.basename(PLS_PATH))
+            return result_updates, sources
+        except Exception as e:
+            st.warning(f"PLS predict failed: {e}")
+            return {}, {}
+
+    # Case B: if model has feature_names_in_, attempt name-based mapping
+    if fname_in is not None:
+        fname_in = list(fname_in)
+        X_mapped = np.full((1, len(fname_in)), np.nan, dtype=float)
+        cur_map = {n: i for i, n in enumerate(feature_names)}
+        for j, req_name in enumerate(fname_in):
+            if req_name in cur_map:
+                X_mapped[0, j] = X_for_models[0, cur_map[req_name]]
+        # if any NaNs remain, try to impute (if imputer provided)
+        if np.isnan(X_mapped).any():
+            if imputer is not None:
+                try:
+                    X_mapped = imputer.transform(X_mapped)
+                except Exception:
+                    st.warning("Couldn't impute missing PLS-mapped features; some values remain NaN.")
+            else:
+                st.warning("PLS expects features not present in the app and no imputer available to fill them.")
+        # attempt prediction
+        try:
+            ypred = pls_model.predict(X_mapped)
+        except Exception as e:
+            st.warning(f"PLS predict failed on mapped input: {e}")
+            return {}, {}
+        # wrap ypred into a fake model for decoding using apply_model_predictions
+        class _FakeModel:
+            def __init__(self, y): self._y = y
+            def predict(self, X): return self._y
+
+        fake = _FakeModel(ypred)
+        try:
+            result_updates, sources = apply_model_predictions(fake, X_for_models, feature_names, base_result.copy(), user_inputs, name_hint=os.path.basename(PLS_PATH))
+            # Indicate source as PLS where applicable
+            for k in list(sources.keys()):
+                sources[k] = os.path.basename(PLS_PATH)
+            return result_updates, sources
+        except Exception:
+            st.warning("Couldn't decode PLS outputs into named features after mapping.")
+            return {}, {}
+
+    # Case C: attempt padding if model expects more features (risky)
+    if req is not None and req > cur:
+        st.warning(
+            f"PLS model expects {req} features but app provides {cur}. Attempting to pad missing inputs with zeros (this is risky)."
+        )
+        X_pad = np.zeros((1, req), dtype=float)
+        X_pad[0, :cur] = X_for_models[0]
+        try:
+            ypred = pls_model.predict(X_pad)
+        except Exception as e:
+            st.warning(f"PLS predict failed after padding: {e}")
+            return {}, {}
+        class _FakeModel:
+            def __init__(self, y): self._y = y
+            def predict(self, X): return self._y
+        fake = _FakeModel(ypred)
+        try:
+            result_updates, sources = apply_model_predictions(fake, X_for_models, feature_names, base_result.copy(), user_inputs, name_hint=os.path.basename(PLS_PATH))
+            for k in list(sources.keys()):
+                sources[k] = os.path.basename(PLS_PATH)
+            return result_updates, sources
+        except Exception:
+            st.warning("Couldn't decode PLS outputs into named features after padding.")
+            return {}, {}
+
+    # Otherwise incompatible
+    st.info("PLS model appears incompatible with current feature set and was skipped.")
+    return {}, {}
+
+
 # ------------------ App logic ------------------
+
 
 def main():
     df = load_dataset()
@@ -199,12 +291,11 @@ def main():
 
     st.sidebar.header("Predictor & Models")
     st.sidebar.write("Files expected in repo root: diesel_properties_clean.xlsx, scaler.joblib (optional), pls_model.joblib (optional), rf_model.zip (optional)")
-    predictor = st.sidebar.selectbox("Predictor", options=["Auto (imputer + models)", "Imputer only", "PLS only", "RF only"]) 
+    predictor = st.sidebar.selectbox("Predictor", options=["Auto (imputer + models)", "Imputer only", "PLS only", "RF only"])
     st.sidebar.markdown("---")
     st.sidebar.write("You can upload different model artifacts directly to the repository root and redeploy.")
 
     # cache imputer to speed up
-    # If the dataset features change (e.g. LABEL column removed) we must refit the imputer.
     need_refit = True
     if 'imputer' in st.session_state:
         existing = st.session_state['imputer']
@@ -253,7 +344,6 @@ def main():
             lo, hi = ranges.get(fname, (None, None))
             if lo is not None and hi is not None:
                 st.markdown(f"<div class='small-muted'>Range: {lo:.6g} — {hi:.6g}</div>", unsafe_allow_html=True)
-            # try parse
             if inp is not None and inp.strip() != "":
                 try:
                     v = float(inp)
@@ -269,6 +359,7 @@ def main():
         else:
             X_row = create_input_row(feature_names, user_inputs)
             X_imputed = imputer.transform(X_row)
+            # Base result: imputer-filled values (so all features have values)
             result = dict(zip(feature_names, X_imputed.ravel().tolist()))
             sources = {f: ('user' if f in user_inputs else 'imputer') for f in feature_names}
 
@@ -279,7 +370,7 @@ def main():
                 except Exception as e:
                     st.warning(f"Scaler transform failed: {e}. Proceeding with unscaled features.")
 
-            # RF
+            # RF models
             if predictor in ("RF only", "Auto (imputer + models)") and rf_models:
                 if len(rf_models) == 1:
                     name, model = next(iter(rf_models.items()))
@@ -289,10 +380,19 @@ def main():
                     for name, model in rf_models.items():
                         result, new_sources = apply_model_predictions(model, X_for_models, feature_names, result, user_inputs, name_hint=name)
                         sources.update(new_sources)
-            # PLS
+
+            # PLS model (safe)
             if predictor in ("PLS only", "Auto (imputer + models)") and pls_model is not None:
-                result, new_sources = apply_model_predictions(pls_model, X_for_models, feature_names, result, user_inputs, name_hint=os.path.basename(PLS_PATH))
-                sources.update(new_sources)
+                # Quick inspection
+                req = getattr(pls_model, "n_features_in_", None)
+                if req is not None and req != X_for_models.shape[1] and not getattr(pls_model, "feature_names_in_", None):
+                    st.warning(f"PLS model expects {req} features but app has {X_for_models.shape[1]}. The app will attempt safe mapping/padding; retraining is recommended for correct results.")
+                updates, pls_sources = safe_apply_pls(pls_model, X_for_models, feature_names, result, user_inputs, imputer=imputer)
+                if updates:
+                    # merge updates into result and sources
+                    for k, v in updates.items():
+                        result[k] = v
+                    sources.update(pls_sources)
 
             # display
             out_df = pd.DataFrame([result]).T
@@ -308,6 +408,7 @@ def main():
             st.write("**Inputs provided:**")
             st.json(user_inputs)
             st.caption("Source legend: 'user' = provided by you; 'imputer' = filled by IterativeImputer; others = model filename used.")
+
 
 if __name__ == '__main__':
     main()
