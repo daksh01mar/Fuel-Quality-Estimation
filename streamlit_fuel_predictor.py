@@ -46,14 +46,11 @@ def load_dataset(path=DATA_XLSX):
         st.error(f"Dataset not found at {path}. Make sure you uploaded `{path}` to your repo root.")
         st.stop()
     df = pd.read_excel(path)
-    # drop obvious non-feature columns
     df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
     for c in ["ID", "Sample", "SampleID", "index", "Unnamed: 0"]:
         if c in df.columns:
             df = df.drop(columns=[c])
-    # keep numeric
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    # remove any accidental 'LABEL' column (case-insensitive)
     numeric_cols = [c for c in numeric_cols if c.lower() != 'label']
     df = df[numeric_cols].copy()
     if df.shape[1] == 0:
@@ -81,8 +78,7 @@ def extract_models_from_zip(zip_path):
                 try:
                     m = joblib.load(p.as_posix())
                     models[p.name] = m
-                except Exception as e:
-                    # Keep a silent load failure for model files inside zip to avoid printing shape errors here.
+                except Exception:
                     pass
     except zipfile.BadZipFile:
         st.warning("rf_model.zip is not a valid zip file or is missing.")
@@ -98,19 +94,15 @@ def create_input_row(feature_names, user_inputs):
 
 
 def apply_model_predictions(model, X_for_models, feature_names, current_result, user_inputs, name_hint=None):
-    """
-    Try to apply a model's predict output to fill missing features.
-    Returns (updated_result_dict, sources_dict)
-    This version intentionally suppresses model predict error messages that expose internal feature counts.
-    """
     sources = {}
     try:
         ypred = model.predict(X_for_models)
     except Exception:
-        # Silently skip models that can't predict on the provided X shape.
         return current_result, sources
+
     ypred = np.asarray(ypred)
     n_features = len(feature_names)
+
     if ypred.ndim == 2 and ypred.shape[1] == n_features:
         for i, fname in enumerate(feature_names):
             if fname not in user_inputs:
@@ -150,15 +142,9 @@ def apply_model_predictions(model, X_for_models, feature_names, current_result, 
 
 def infer_ranges_from_specs_or_data(feature_names, df):
     ranges = {}
-    # try to read SPEC_XLSX if present and has min/max columns
     if os.path.exists(SPEC_XLSX):
         try:
             spec_df = pd.read_excel(SPEC_XLSX)
-            # try to find columns that match feature names and min/max
-            for fname in feature_names:
-                if fname in spec_df.columns:
-                    pass
-            # look for 'Parameter','Min','Max' style
             param_col = None
             min_col = None
             max_col = None
@@ -166,9 +152,9 @@ def infer_ranges_from_specs_or_data(feature_names, df):
                 lc = c.lower()
                 if 'param' in lc or 'parameter' in lc or 'name' in lc:
                     param_col = c
-                if lc in ('min','minimum'):
+                if lc in ('min', 'minimum'):
                     min_col = c
-                if lc in ('max','maximum'):
+                if lc in ('max', 'maximum'):
                     max_col = c
             if param_col and min_col and max_col:
                 for _, row in spec_df.iterrows():
@@ -180,7 +166,7 @@ def infer_ranges_from_specs_or_data(feature_names, df):
                             pass
         except Exception:
             pass
-    # fallback to dataset percentiles if not found
+
     for fname in feature_names:
         if fname not in ranges:
             col = df[fname].dropna()
@@ -190,7 +176,6 @@ def infer_ranges_from_specs_or_data(feature_names, df):
             else:
                 lo = float(col.min())
                 hi = float(col.max())
-            # small padding
             padding = max(abs(0.05 * lo), 1e-6)
             ranges[fname] = (lo - padding, hi + padding)
     return ranges
@@ -202,13 +187,10 @@ def main():
     feature_names = df.columns.tolist()
 
     st.sidebar.header("Predictor & Models")
-    st.sidebar.write("Files expected in repo root: diesel_properties_clean.xlsx, scaler.joblib (optional), pls_model.joblib (optional), rf_model.zip (optional)")
+    st.sidebar.write("Files expected in repo root: diesel_properties_clean.xlsx, scaler.joblib, pls_model.joblib, rf_model.zip")
     predictor = st.sidebar.selectbox("Predictor", options=["Auto (imputer + models)", "Imputer only", "PLS only", "RF only"]) 
     st.sidebar.markdown("---")
-    st.sidebar.write("You can upload different model artifacts directly to the repository root and redeploy.")
 
-    # cache imputer to speed up
-    # If the dataset features change (e.g. LABEL column removed) we must refit the imputer.
     need_refit = True
     if 'imputer' in st.session_state:
         existing = st.session_state['imputer']
@@ -220,13 +202,11 @@ def main():
             st.session_state['imputer'] = build_imputer(df)
     imputer = st.session_state['imputer']
 
-    # load optional models
     scaler = None
     if os.path.exists(SCALER_PATH):
         try:
             scaler = joblib.load(SCALER_PATH)
         except Exception:
-            # suppressed: do not show scaler load errors to the user
             scaler = None
 
     pls_model = None
@@ -237,34 +217,41 @@ def main():
             st.sidebar.warning(f"Couldn't load PLS model: {e}")
 
     rf_models = extract_models_from_zip(RF_ZIP_PATH)
-
-    # compute ranges to display under inputs
     ranges = infer_ranges_from_specs_or_data(feature_names, df)
 
-    # Build a clean grid of inputs (no extra checkboxes)
+    # ---------------- INPUT SECTIONS WITH HEADINGS ----------------
     st.subheader("Inputs")
     st.write("Provide any two parameter values. Leave others blank.")
 
     user_inputs = {}
     cols = st.columns(3)
+
     for i, fname in enumerate(feature_names):
         with cols[i % 3]:
+
+            # NEW: Heading above each input
+            st.markdown(f"### {fname}")
+
             inp = st.text_input(
-                "",
+                fname,
                 key=f"inp_{fname}",
-                placeholder=f"Enter {fname} (e.g. {df[fname].median():.3g})",
-                label_visibility="collapsed"
+                placeholder=f"Enter {fname} (e.g. {df[fname].median():.3g})"
             )
+
             lo, hi = ranges.get(fname, (None, None))
             if lo is not None and hi is not None:
-                st.markdown(f"<div class='small-muted'>Range: {lo:.6g} — {hi:.6g}</div>", unsafe_allow_html=True)
-            # try parse
+                st.markdown(
+                    f"<div class='small-muted'>Range: {lo:.6g} — {hi:.6g}</div>",
+                    unsafe_allow_html=True
+                )
+
             if inp is not None and inp.strip() != "":
                 try:
                     v = float(inp)
                     user_inputs[fname] = v
                 except Exception:
-                    st.info(f"{fname}: Unable to parse '{inp}' as a number. Please enter a numeric value.")
+                    st.info(f"{fname}: Unable to parse '{inp}' as a number.")
+
     st.markdown("---")
     predict_btn = st.button("Predict", key="predict")
 
@@ -282,35 +269,25 @@ def main():
                 try:
                     X_for_models = scaler.transform(X_imputed)
                 except Exception:
-                    # Suppressed: do not display the scaler transform failure message to user
                     X_for_models = X_imputed.copy()
 
-            # RF
             if predictor in ("RF only", "Auto (imputer + models)") and rf_models:
-                if len(rf_models) == 1:
-                    name, model = next(iter(rf_models.items()))
+                for name, model in rf_models.items():
                     result, new_sources = apply_model_predictions(model, X_for_models, feature_names, result, user_inputs, name_hint=name)
                     sources.update(new_sources)
-                else:
-                    for name, model in rf_models.items():
-                        result, new_sources = apply_model_predictions(model, X_for_models, feature_names, result, user_inputs, name_hint=name)
-                        sources.update(new_sources)
-            # PLS
+
             if predictor in ("PLS only", "Auto (imputer + models)") and pls_model is not None:
                 try:
-                    result, new_sources = apply_model_predictions(pls_model, X_for_models, feature_names, result, user_inputs, name_hint=os.path.basename(PLS_PATH))
+                    result, new_sources = apply_model_predictions(pls_model, X_for_models, feature_names, result, user_inputs, name_hint=PLS_PATH)
                     sources.update(new_sources)
                 except Exception:
-                    # Suppress shape mismatch messaging from PLS predictions
                     pass
 
-            # display
             out_df = pd.DataFrame([result]).T
             out_df.columns = ["Value"]
             out_df["Source"] = pd.Series(sources)
-            out_df_display = out_df.round(6)
             st.subheader("Predicted / Completed Properties")
-            st.dataframe(out_df_display)
+            st.dataframe(out_df.round(6))
 
             csv = pd.DataFrame([result]).to_csv(index=False)
             st.download_button("Download CSV", data=csv, file_name="predicted_fuel_properties.csv", mime="text/csv")
